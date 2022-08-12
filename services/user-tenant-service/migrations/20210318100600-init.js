@@ -1,7 +1,9 @@
 'use strict';
 
 let dbm;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 let type;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 let seed;
 const fs = require('fs');
 const path = require('path');
