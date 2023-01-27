@@ -110,16 +110,21 @@ export class OrGatewayLinkStrategy implements LinkStrategy<ModdleElement> {
     flowId: string,
     isElse?: boolean,
   ) {
-    const lastNodeWithOutput = this.getLastNodeWithOutput(node);
-    const read = `var readObj = JSON.parse(execution.getVariable('${lastNodeWithOutput.element.id}'));`;
-    const declarations = `var ids = [];var json = S("{}");`;
+    const lastNodes = this.getLastNodeWithOutput(node);
+    let read = '';
+    let loop = '';
+    let condition = '';
+    for(let i = 1; i <= lastNodes.length; i++) {
+      read += `var readObj${i} = JSON.parse(execution.getVariable('${lastNodes[i-1].id}')); \n`;
+      condition = this.getCondition(node.prev[i-1]);
+      loop += this.createLoopScript(node.prev[i-1], condition, i);
+    }
+    const declarations = `var flag = false;var ids = [];var json = S("{}");`;
     const column = node.workflowNode.state.get('columnName');
-    const condition = this.getCondition(node);
-    const loop = this.createLoopScript(node, condition, isElse);
     const setters = `
       json.prop("taskIds", ids);
       execution.setVariable('${flowId}',json);
-      if(ids.length > 0){true;}else {false;}
+      if(${isElse ? '!' : ''}(flag)){true;}else {false;}
       `;
     return {
       script: [read, declarations, loop, setters].join('\n'),
@@ -139,17 +144,42 @@ export class OrGatewayLinkStrategy implements LinkStrategy<ModdleElement> {
   private createLoopScript(
     node: BpmnStatementNode,
     condition: string,
-    isElse = false,
+    num: number,
   ) {
-    switch (node.workflowNode.state.get('condition')) {
+    const column: string = node.workflowNode.state.get('columnName');
+    const conditionType = node.workflowNode.state.get('condition');
+    if (column?.toLowerCase() === InputTypes.People) {
+      return `var selectedVals = ${condition};
+      var selCol = selectedVals.split(',');
+      for(var key in readObj${num}){
+        var taskValuePair = readObj${num}[key];
+        if(taskValuePair && taskValuePair.value && taskValuePair.value.length){
+            var hasUser = false;
+            var usCol = taskValuePair.value;
+            ids = [taskValuePair.id];
+            for(var selKey in selCol){
+                for(var myKey in usCol){
+                    if(usCol[myKey].value == selCol[selKey] && !hasUser){
+                        hasUser = true;
+                    }
+                }
+            }
+            if(hasUser){
+              flag=true;
+            }
+        }
+      }`
+    }
+    switch (conditionType) {
       case ConditionTypes.PastToday:
         return `
                 for(var key in readObj){
                   var taskValuePair = readObj[key];
+                  ids = [taskValuePair.id];
                   if(taskValuePair && taskValuePair.value){
                     var readDateValue = new Date(taskValuePair.value);
-                    if(${isElse ? '!' : ''}(readDateValue < new Date())){
-                      ids.push(taskValuePair.id);
+                    if(readDateValue < new Date()){
+                      flag = true;
                     }
                   }
                 }
@@ -159,27 +189,25 @@ export class OrGatewayLinkStrategy implements LinkStrategy<ModdleElement> {
         return `
                 for(var key in readObj){
                   var taskValuePair = readObj[key];
+                  ids = [taskValuePair.id];
                   if(taskValuePair && taskValuePair.value){
                     var readDateValue = new Date(taskValuePair.value);
-                    if(${
-                      isElse ? '!' : ''
-                    }(readDateValue > new Date() && readDateValue.setDate(readDateValue.getDate()${condition}) < new Date())){
-                      ids.push(taskValuePair.id);
+                    if(readDateValue > new Date() && readDateValue.setDate(readDateValue.getDate()${condition}) < new Date()){
+                      flag = true;
                     }
                   }
                 }
               `;
       default:
         return `
-                for(var key in readObj){
-                  var taskValuePair = readObj[key];
-                  if(taskValuePair && ${
-                    isElse ? '!' : ''
-                  }(taskValuePair.value${condition})){
-                    ids.push(taskValuePair.id);
-                  }
+              for(var key in readObj${num}){
+                var taskValuePair = readObj${num}[key];
+                ids = [taskValuePair.id];
+                if(taskValuePair && (taskValuePair.value${condition})){
+                  flag = true;
                 }
-              `;
+              }
+            `;
     }
   }
 
@@ -189,15 +217,7 @@ export class OrGatewayLinkStrategy implements LinkStrategy<ModdleElement> {
    * @returns The last node with an output.
    */
   private getLastNodeWithOutput(node: BpmnStatementNode) {
-    let queue = [node];
-    while (queue.length > 0) {
-      const current = queue.shift()!;
-      if (current.element.outputs) {
-        return current;
-      }
-      if (current?.prev && current.prev.length) queue.push(...current.prev);
-    }
-    return queue[queue.length - 1];
+    return node.tag.get('incoming');
   }
 
   /**
@@ -211,8 +231,8 @@ export class OrGatewayLinkStrategy implements LinkStrategy<ModdleElement> {
     if (valueType === InputTypes.Text || valueType === InputTypes.List) {
       value = `'${value}'`;
     }
-    if (valueType === InputTypes.People) {
-      value = `'${JSON.stringify(value)}'`;
+    if (value && valueType === InputTypes.People) {
+      return `'${value.ids}'`;
     }
     const condition = node.workflowNode.state.get('condition');
     const pair = this.conditions.find(item => item.condition === condition);
